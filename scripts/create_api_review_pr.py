@@ -1,4 +1,10 @@
 #!/usr/bin/env python
+
+# --------------------------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License. See License.txt in the project root for license information.
+# --------------------------------------------------------------------------------------------
+
 """Create an API review PR for an Azure SDK Python package.
 
 Workflow:
@@ -32,6 +38,7 @@ access on the ``origin`` remote.
 from __future__ import annotations
 
 import argparse
+import json
 import glob
 import os
 import re
@@ -40,6 +47,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Optional
+from urllib.parse import quote
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -182,7 +190,8 @@ def current_branch_or_sha() -> str:
 # ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    doc = __doc__ or "Create an API review PR"
+    p = argparse.ArgumentParser(description=doc.splitlines()[0])
     p.add_argument("--package-name", required=True,
                    help="Package directory name under sdk/*/ (e.g. azure-ai-projects)")
     p.add_argument("--base", default=None,
@@ -316,9 +325,11 @@ def main() -> int:
 
         # ---- Step 5: open PR --------------------------------------------
         title = f"[API Review] {package_name} {target_version} (base {base_version})"
+        working_ref = _working_reference_markdown(original_branch)
         body_lines = [
             f"Automated API review PR for `{package_name}`.",
             "",
+            f"- **Working branch:** {working_ref}",
             f"- **Target:** `{args.target or 'origin/main'}` (version `{target_version}`)",
             f"- **Baseline:** {'tag `' + args.base + '`' if args.base else '_empty_'} "
             f"(version `{base_version}`)",
@@ -400,6 +411,54 @@ def _env_with_real_git() -> dict:
         env["PATH"] = git_dir + os.pathsep + current_path
         print(f"(prepending real git to PATH for gh: {git_dir})")
     return env
+
+
+def _find_open_pr_for_branch(branch: str) -> Optional[dict]:
+    """Return open PR metadata for a branch, or None when no PR exists."""
+    result = run(
+        [
+            "gh",
+            "pr",
+            "list",
+            "--repo",
+            "Azure/azure-sdk-for-python",
+            "--head",
+            branch,
+            "--state",
+            "open",
+            "--json",
+            "number,url",
+        ],
+        check=False,
+        capture=True,
+        env=_env_with_real_git(),
+    )
+    if result.returncode != 0:
+        return None
+
+    try:
+        prs = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return None
+
+    if not prs:
+        return None
+
+    pr = prs[0]
+    if not isinstance(pr, dict) or "number" not in pr or "url" not in pr:
+        return None
+
+    return pr
+
+
+def _working_reference_markdown(branch: str) -> str:
+    """Build markdown for the working branch, preferring an open PR link."""
+    pr = _find_open_pr_for_branch(branch)
+    if pr:
+        return f"[PR #{pr['number']}]({pr['url']})"
+
+    branch_url = f"https://github.com/Azure/azure-sdk-for-python/tree/{quote(branch, safe='')}"
+    return f"[branch `{branch}`]({branch_url})"
 
 
 def _generate_with_cached_script(cached_script: str, cached_export: str, package_name: str, package_dir: str) -> bytes:
